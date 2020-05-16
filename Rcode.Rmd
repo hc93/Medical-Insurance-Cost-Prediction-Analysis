@@ -1,0 +1,271 @@
+---
+title: 'Final Project - Medical Insurance'
+author: "Somil Saxena"
+output:
+  html_document:
+    code_folding: hide
+    highlight: tango
+    theme: united
+    toc: yes
+    toc_depth: 3
+  word_document:
+    toc: yes
+    toc_depth: '3'
+---
+  
+```{r setup, include=FALSE,fig.width=11,echo=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r Package Block , warning=FALSE,message=FALSE}
+library(tidyverse)
+library(caret)
+library(GGally)
+library(readr)
+library(tibble)
+library(purrr)
+library(randomForest)
+library(glmnet)
+```
+
+## Executive Summary
+
+### Problem and Approach    
+
+Medical Insurance
+
+### Major Results     
+
+Predicting the charges
+
+```{r}
+# Loading Dataset
+set.seed(3238)
+insurance <- read_csv("insurance/insurance_v3.csv")
+head(insurance)
+```
+
+# 1. Exploratory Data Analysis
+
+## Data Description
+
+```{r results='hide'}
+str(insurance)
+```
+The dataset contains `r nrow(insurance)` observations and `r ncol(insurance)` variables.
+
+## Summary Statistics
+```{r}
+summary(insurance)
+```
+
+## Feature Engineering
+
+```{r}
+insurance$sex = as.factor(insurance$sex)
+insurance$smoker = as.factor(insurance$smoker)
+insurance$region = as.factor(insurance$region)
+
+insurance$bmi30 = as.factor(ifelse(insurance$bmi>30,"Obese","Not Obese"))
+```
+
+## Sampling Data : Train/Test Split (80-20) and Normalization
+
+```{r}
+sample_index = sample(nrow(insurance), nrow(insurance)*0.8)
+insurance_train = insurance[sample_index,] 
+insurance_test = insurance[-sample_index,]
+
+x_train = insurance_train %>% dplyr::select(-c(charges))
+y_train = insurance_train %>% dplyr::select(charges)
+
+x_test = insurance_test %>% dplyr::select(-c(charges))
+y_test = insurance_test %>% dplyr::select(charges)
+
+#Normalize for train data
+insurance_train$charges = (insurance_train$charges - min(insurance_train$charges))/(max(insurance_train$charges)-min(insurance_train$charges))
+ 
+ #Normalize for test data
+insurance_test$charges = (insurance_test$charges - min(insurance_test$charges))/(max(insurance_test$charges)-min(insurance_test$charges))
+```
+
+## Linear Model
+
+```{r}
+#Full Model without Interaction
+full_model = lm(charges~., data = insurance_train)
+#summary(full_model)
+
+#Interaction Effects
+formulaWithInterEffects = as.formula(charges ~.+bmi30:smoker)
+insurance.interEffect = lm(formulaWithInterEffects, data= insurance_train)
+#summary(insurance.interEffect)
+
+#In sample MSE
+insurance.lm.pred.train<- predict(insurance.interEffect, insurance_train)
+mean((insurance_train$charges-insurance.lm.pred.train)^2)
+
+#Out of Sample MSE
+insurance.lm.pred.test<- predict(insurance.interEffect, insurance_test)
+mean((insurance_test$charges-insurance.lm.pred.test)^2)
+```
+
+## 1. RANDOM FOREST ----------------------------------------------------------------------------
+
+```{r}
+oob.err<- rep(0, 7)
+test.err<- rep(0, 7)
+for(i in 1:7){
+  fit<- randomForest(formulaWithInterEffects, data = insurance_train, mtry=i)
+  oob.err[i]<- fit$mse[500]
+  test.err[i]<- mean((insurance_test$charges-predict(fit, insurance_test))^2)
+  cat(i, " ")
+}
+
+matplot(cbind(test.err, oob.err), pch=15, col = c("red", "blue"), type = "b", ylab = "MSE", xlab = "mtry")
+legend("topright", legend = c("test Error", "OOB Error"), pch = 15, col = c("red", "blue"))
+
+insurance.rf = randomForest(formulaWithInterEffects,data=insurance_train,mtry=2,ntree=200)
+
+plot(insurance.rf$mse,type='l',col=2,lwd=2,xlab="ntree",ylab="OOB Error")
+
+#Variable Importance Plot
+varimp <- data.frame(insurance.rf$importance)
+ggplot(varimp, aes(x=reorder(rownames(varimp),IncNodePurity), y=IncNodePurity)) +
+  geom_bar(stat="identity", fill="blue", colour="black") +
+  coord_flip() + theme_bw(base_size = 8) +
+  labs(title="Prediction using RandomForest with 200 trees", subtitle="Variable importance (IncNodePurity)", x="Variable", y="Variable importance (IncNodePurity)")
+
+#Predict
+insurance.rf.pred.train<- predict(insurance.rf, insurance_train)
+insurance.rf.pred.test<- predict(insurance.rf, insurance_test)
+
+# R^2 train
+res <- insurance.rf.pred.train - insurance_train$charges
+modelOutput_rf.train <- data.frame(obs = insurance_train$charges, pred = insurance.rf.pred.train)
+
+
+results<-data.frame("RMSE" = 0, "R squared"= 0 , "MAE"= 0)
+results<-rbind(results,defaultSummary(modelOutput_rf.train))
+results<-results[-1,]
+
+# R^2 test
+res <- insurance.rf.pred.test - insurance_test$charges
+modelOutput_rf.test <- data.frame(obs = insurance_test$charges, pred = insurance.rf.pred.test)
+results<-rbind(results,defaultSummary(modelOutput_rf.test))
+```
+
+## 2. XG BOOST ----------------------------------------------------------------------------
+
+```{r}
+control<-trainControl(method="cv",number=10)
+metric<-"RMSE"
+
+insurance.xgb<-train(formulaWithInterEffects, data =insurance_train, method = "xgbTree",trControl=control,metric=metric, verbose=F) 
+
+insurance.xgb$bestTune
+
+#Predict
+insurance.xgb.pred.train<- predict(insurance.xgb, insurance_train)
+insurance.xgb.pred.test<- predict(insurance.xgb, insurance_test)
+
+#R2 Train
+res <- insurance.xgb.pred.train - insurance_train$charges
+modelOutput_xgb.train <- data.frame(obs = insurance_train$charges, pred = insurance.xgb.pred.train)
+results<-rbind(results,defaultSummary(modelOutput_xgb.train))
+
+
+#R2 Test
+res <- insurance.xgb.pred.test - insurance_test$charges
+modelOutput_xgb.test <- data.frame(obs = insurance_test$charges, pred = insurance.xgb.pred.test)
+results<-rbind(results,defaultSummary(modelOutput_xgb.test))
+
+plot(varImp(insurance.xgb),main="Model Feature Importance-XGB")
+
+# RMSE(predictions, insurance_train$charges)
+# getTrainPerf(insurance.xgb)
+```
+## 3. Gradient Boosting ----------------------------------------------------------------------------
+
+```{r}
+insurance.gbm<-train(formulaWithInterEffects, data =insurance_train, method = "gbm",trControl=control,metric=metric,
+               verbose=F) 
+
+insurance.gbm$bestTune
+
+#Predict
+insurance.gbm.pred.train<- predict(insurance.gbm, insurance_train)
+insurance.gbm.pred.test<- predict(insurance.gbm, insurance_test)
+
+#R2 Train
+res <- insurance.gbm.pred.train - insurance_train$charges
+modelOutput_gbm.train <- data.frame(obs = insurance_train$charges, pred = insurance.gbm.pred.train)
+results<-rbind(results,defaultSummary(modelOutput_gbm.train))
+
+#R2 Test
+res <- insurance.gbm.pred.test - insurance_test$charges
+modelOutput_gbm.test <- data.frame(obs = insurance_test$charges, pred = insurance.gbm.pred.test)
+results<-rbind(results,defaultSummary(modelOutput_gbm.test))
+
+#Choose the GBM  model
+plot(insurance.gbm,main="GBM")
+
+# RMSE(predictions, insurance_train$charges)
+# getTrainPerf(insurance.gbm)
+
+#rf_r2 = R2_Score(insurance_train$charges,insurance.gbm.pred.train)
+#rf_r2
+```
+
+## 4. SVM : REGRESSOR ----------------------------------------------------------------------------
+
+```{r warning=FALSE}
+library(quantmod)
+library(e1071)
+
+insurance.svm<- train(formulaWithInterEffects, data =insurance_train, method = "svmRadial",trControl=control,metric=metric, verbose=F) 
+insurance.svm$bestTune
+
+#Predict
+insurance.svm.pred.train<- predict(insurance.svm, insurance_train)
+insurance.svm.pred.test<- predict(insurance.svm, insurance_test)
+
+#R2 Train
+res <- insurance.svm.pred.train - insurance_train$charges
+modelOutput_svm.train <- data.frame(obs = insurance_train$charges, pred = insurance.svm.pred.train)
+results<-rbind(results,defaultSummary(modelOutput_svm.train))
+
+#R2 Test
+res <- insurance.svm.pred.test - insurance_test$charges
+modelOutput_svm.test <- data.frame(obs = insurance_test$charges, pred = insurance.svm.pred.test)
+results<-rbind(results,defaultSummary(modelOutput_svm.test))
+#insurance.svm<-svm(formulaWithInterEffects,data=insurance_train,method="linear") 
+# perform a grid search 
+# (this might take a few seconds, adjust how fine of grid if taking too long)
+#tuneResult1 <- tune(svm, formulaWithInterEffects,  data = insurance_train)
+# Map tuning results
+#plot(tuneResult1)
+
+#insurance.svm<-svm(formulaWithInterEffects,data=insurance_train,method="linear") 
+#rf_r2 = R2_Score(insurance_train$charges,insurance.svm.pred.train)
+#rf_r2
+```
+
+## Model Comparison
+```{r}
+row.names(results) <- c("RF_Train","RF_Test","XGB_Train","XGB_Test","GBM_Train","GBM_Test","SVM_Train","SVM_Test")
+
+results$model <- c("RF_Train","RF_Test","XGB_Train","XGB_Test","GBM_Train","GBM_Test","SVM_Train","SVM_Test")
+results$code <- c("RF_Train","RF_Test","XGB_Train","XGB_Test","GBM_Train","GBM_Test","SVM_Train","SVM_Test")
+
+results$Set_type <- c("Train","Test","Train","Test","Train","Test","Train","Test")
+
+results$Model <- c("RF","RF","XGB","XGB","GBM","GBM","SVM","SVM")
+
+ggplot(data=results , aes( x = Model ,y= R.squared , fill = Set_type)) + geom_bar (stat="identity", position = position_dodge(width = 0.1), colour="black" , width = 0.7) + geom_text(aes( x = Model ,y= R.squared +.03, label = round(R.squared,3))) + ggtitle("Comparison of R-squared for Different Models")
+```
+
+```{r}
+results
+```
+
