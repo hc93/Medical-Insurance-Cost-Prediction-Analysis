@@ -1,6 +1,6 @@
 ---
 title: 'Final Project - Medical Insurance'
-author: "Somil Saxena"
+author: "Himanshu Chhabra"
 output:
   html_document:
     code_folding: hide
